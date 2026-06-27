@@ -76,6 +76,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         self.sent_response_created_event: bool = False
         self.sent_response_in_progress_event: bool = False
         self.sent_output_item_added_event: bool = False
+        self._sent_message_output_item_added_event: bool = False
         self.sent_content_part_added_event: bool = False
         self.sent_output_text_done_event: bool = False
         self.sent_output_content_part_done_event: bool = False
@@ -146,6 +147,28 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             or delta.tool_calls
             or chunk.choices[0].finish_reason is not None
         )
+
+    def _chunk_has_emit_signal(self, chunk: ModelResponseStream) -> bool:
+        if not chunk.choices:
+            return False
+        choice = chunk.choices[0]
+        delta = choice.delta
+
+        if getattr(delta, "reasoning_content", None):
+            return True
+        if getattr(delta, "thinking_blocks", None):
+            return True
+        if getattr(delta, "tool_calls", None):
+            return True
+        if getattr(delta, "function_call", None):
+            return True
+        if getattr(delta, "content", None):
+            return True
+        if getattr(delta, "annotations", None):
+            return True
+        if choice.finish_reason is not None:
+            return True
+        return False
 
     def _queue_tool_call_delta_events(self, tool_calls: object) -> None:
         """
@@ -724,6 +747,11 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
     def return_default_done_events(
         self, litellm_complete_object: ModelResponse
     ) -> Optional[BaseLiteLLMOpenAIResponseObject]:
+        if not self._sent_message_output_item_added_event:
+            self.sent_output_text_done_event = True
+            self.sent_output_content_part_done_event = True
+            self.sent_output_item_done_event = True
+            return None
         if self.sent_output_text_done_event is False:
             self.sent_output_text_done_event = True
             return self.create_output_text_done_event(litellm_complete_object)
@@ -794,6 +822,8 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         # Change: Never return a value, just enqueue output item events
         if self.sent_output_item_added_event:
             return
+        if not self._chunk_has_emit_signal(chunk):
+            return
         delta = chunk.choices[0].delta
 
         self._sequence_number += 1
@@ -844,6 +874,7 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             ),
         )
         event.__dict__["sequence_number"] = self._sequence_number
+        self._sent_message_output_item_added_event = True
         self._pending_response_events.append(event)
 
         # Emit content_part.added immediately after output_item.added for message
@@ -1091,10 +1122,17 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
             and chunk.choices[0].delta.reasoning_content
         ):
             reasoning_content = chunk.choices[0].delta.reasoning_content
+            reasoning_item_id = (
+                self._reasoning_item_id
+                or self._cached_reasoning_item_id
+                or f"rs_{uuid.uuid4()}"
+            )
+            self._cached_reasoning_item_id = reasoning_item_id
+            self._reasoning_item_id = reasoning_item_id
 
             return ReasoningSummaryTextDeltaEvent(
                 type=ResponsesAPIStreamEvents.REASONING_SUMMARY_TEXT_DELTA,
-                item_id=f"rs_{hash(str(reasoning_content))}",
+                item_id=reasoning_item_id,
                 output_index=0,
                 delta=reasoning_content,
             )

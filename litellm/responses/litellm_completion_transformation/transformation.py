@@ -994,8 +994,10 @@ class LiteLLMCompletionResponsesConfig:
             return [
                 GenericChatCompletionMessage(
                     role=input_item.get("role") or "user",
-                    content=LiteLLMCompletionResponsesConfig._transform_responses_api_content_to_chat_completion_content(
-                        content
+                    content=LiteLLMCompletionResponsesConfig._collapse_text_only_chat_content(
+                        LiteLLMCompletionResponsesConfig._transform_responses_api_content_to_chat_completion_content(
+                            content
+                        )
                     ),
                 )
             ]
@@ -1312,6 +1314,31 @@ class LiteLLMCompletionResponsesConfig:
             return content_list
         else:
             raise ValueError(f"Invalid content type: {type(content)}")
+
+    @staticmethod
+    def _collapse_text_only_chat_content(
+        content: Union[str, List[Union[str, Dict[str, Any]]]],
+    ) -> Union[str, List[Union[str, Dict[str, Any]]]]:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list) or not content:
+            return content
+
+        text_parts: List[str] = []
+        for block in content:
+            if isinstance(block, str):
+                text_parts.append(block)
+                continue
+            if not isinstance(block, dict):
+                return content
+            if block.get("type") != "text" or "cache_control" in block:
+                return content
+            text = block.get("text")
+            if not isinstance(text, str):
+                return content
+            text_parts.append(text)
+
+        return "".join(text_parts)
 
     @staticmethod
     def _get_chat_completion_request_content_type(

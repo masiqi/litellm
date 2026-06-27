@@ -138,6 +138,65 @@ def test_tool_calls_present_only_in_final_response_are_emitted_before_completed(
     assert evt_final.output_index == 1
 
 
+def test_tool_only_final_response_does_not_emit_message_done_event():
+    iterator = LiteLLMCompletionStreamingIterator(
+        model="test-model",
+        litellm_custom_stream_wrapper=AsyncMock(),
+        request_input="Test input",
+        responses_api_request={},
+    )
+
+    response = ModelResponse(
+        id="resp-1",
+        created=123,
+        model="test-model",
+        object="chat.completion",
+        choices=[
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "do_thing", "arguments": '{"y":2}'},
+                            "index": 0,
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    iterator.litellm_model_response = response
+
+    events = []
+    for _ in range(10):
+        event = iterator.common_done_event_logic(sync_mode=True)
+        events.append(event)
+        if event.type == ResponsesAPIStreamEvents.RESPONSE_COMPLETED:
+            break
+
+    function_done_events = [
+        event
+        for event in events
+        if event.type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE
+        and event.output_index == 1
+    ]
+    message_done_events = [
+        event
+        for event in events
+        if event.type == ResponsesAPIStreamEvents.OUTPUT_ITEM_DONE
+        and event.output_index == 0
+    ]
+
+    assert len(function_done_events) == 1
+    assert message_done_events == []
+    assert events[-1].type == ResponsesAPIStreamEvents.RESPONSE_COMPLETED
+
+
 def test_tool_call_arguments_are_chunked_to_match_openai_behavior():
     """
     Test that large tool call arguments are split into smaller chunks (size 10)

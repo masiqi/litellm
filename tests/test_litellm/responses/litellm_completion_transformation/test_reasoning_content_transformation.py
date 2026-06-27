@@ -62,6 +62,40 @@ class TestReasoningContentStreaming:
         assert transformed_chunk.delta == "Let me think about this problem..."
         assert transformed_chunk.type == "response.reasoning_summary_text.delta"
 
+    def test_reasoning_delta_uses_reasoning_output_item_id(self):
+        chunk = ModelResponseStream(
+            id="test-id",
+            created=1234567890,
+            model="test-model",
+            object="chat.completion.chunk",
+            choices=[
+                StreamingChoices(
+                    finish_reason=None,
+                    index=0,
+                    delta=Delta(
+                        content="",
+                        role="assistant",
+                        reasoning_content="Need to call Bash.",
+                    ),
+                )
+            ],
+        )
+
+        iterator = LiteLLMCompletionStreamingIterator(
+            model="test-model",
+            litellm_custom_stream_wrapper=AsyncMock(),
+            request_input="Test input",
+            responses_api_request={},
+        )
+
+        iterator._ensure_output_item_for_chunk(chunk)
+        reasoning_item_event = iterator._pending_response_events.pop(0)
+        reasoning_delta_event = (
+            iterator._transform_chat_completion_chunk_to_response_api_chunk(chunk)
+        )
+
+        assert reasoning_delta_event.item_id == reasoning_item_event.item.id
+
     def test_mixed_content_and_reasoning(self):
         """Test handling of both content and reasoning content"""
         # Setup

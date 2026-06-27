@@ -6,6 +6,8 @@ Tests for AnthropicResponsesStreamWrapper
 import os
 import sys
 
+import pytest
+
 sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../.."))
 )
@@ -20,6 +22,20 @@ def _process_all(events: list) -> list:
     for event in events:
         wrapper._process_event(event)
     return list(wrapper._chunk_queue)
+
+
+class _AsyncEventStream:
+    def __init__(self, events: list) -> None:
+        self._events = iter(events)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._events)
+        except StopIteration:
+            raise StopAsyncIteration
 
 
 class TestProcessEventTextDeltaWithoutOutputItemAdded:
@@ -77,3 +93,70 @@ class TestProcessEventTextDeltaWithoutOutputItemAdded:
             ("content_block_start", 0),
             ("content_block_delta", 0),
         ]
+
+
+class TestAnthropicResponsesStreamWrapperAsyncIteration:
+    @pytest.mark.asyncio
+    async def test_does_not_duplicate_message_start_when_response_created_arrives(self):
+        wrapper = AnthropicResponsesStreamWrapper(
+            responses_stream=_AsyncEventStream(
+                [
+                    {"type": "response.created"},
+                    {
+                        "type": "response.output_item.added",
+                        "item": {"type": "message", "id": "msg_1"},
+                    },
+                ]
+            ),
+            model="m",
+        )
+
+        chunks = [await wrapper.__anext__(), await wrapper.__anext__()]
+
+        assert [chunk["type"] for chunk in chunks] == [
+            "message_start",
+            "content_block_start",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_sends_fallback_message_start_before_first_content_block(self):
+        wrapper = AnthropicResponsesStreamWrapper(
+            responses_stream=_AsyncEventStream(
+                [
+                    {
+                        "type": "response.output_item.added",
+                        "item": {"type": "message", "id": "msg_1"},
+                    },
+                ]
+            ),
+            model="m",
+        )
+
+        chunks = [await wrapper.__anext__(), await wrapper.__anext__()]
+
+        assert [chunk["type"] for chunk in chunks] == [
+            "message_start",
+            "content_block_start",
+        ]
+
+    def test_reasoning_delta_opens_thinking_block_for_unregistered_item(self):
+        chunks = _process_all(
+            [
+                {
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": "rs_1",
+                    "delta": "Need to call Bash.",
+                }
+            ]
+        )
+
+        assert [c["type"] for c in chunks] == [
+            "content_block_start",
+            "content_block_delta",
+        ]
+        assert chunks[0]["content_block"] == {"type": "thinking", "thinking": ""}
+        assert chunks[1]["index"] == 0
+        assert chunks[1]["delta"] == {
+            "type": "thinking_delta",
+            "thinking": "Need to call Bash.",
+        }

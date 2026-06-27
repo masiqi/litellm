@@ -1014,6 +1014,36 @@ class TestContentTypeTransformation:
         assert result[0]["text"] == "valid text"
         assert result[1]["text"] == "another valid"
 
+    def test_text_only_response_input_items_become_string_chat_content(self):
+        """
+        Text-only Responses API message content should become string chat content.
+        OpenAI-compatible chat completion providers can reject Anthropic/Responses-style
+        text block lists such as [{"type": "text", "text": "..."}].
+        """
+        input_items = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "用 Bash 执行 pwd"},
+                ],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "我会执行 pwd"},
+                ],
+            },
+        ]
+
+        messages = LiteLLMCompletionResponsesConfig._transform_response_input_param_to_chat_completion_message(
+            input=input_items
+        )
+
+        assert messages[0]["content"] == "用 Bash 执行 pwd"
+        assert messages[1]["content"] == "我会执行 pwd"
+
 
 class TestToolTransformation:
     """Test cases for tool transformation from Responses API to Chat Completion format"""
@@ -2099,6 +2129,21 @@ class TestEnsureOutputItemContentPartAdded:
         chunk.choices = [MagicMock(delta=delta)]
         return chunk
 
+    def _make_role_only_chunk(self):
+        """Create a mock ModelResponseStream with only assistant role metadata."""
+        from unittest.mock import MagicMock
+
+        chunk = MagicMock()
+        delta = MagicMock()
+        delta.reasoning_content = None
+        delta.thinking_blocks = None
+        delta.tool_calls = None
+        delta.content = ""
+        delta.function_call = None
+        delta.annotations = None
+        chunk.choices = [MagicMock(delta=delta, finish_reason=None)]
+        return chunk
+
     def test_message_item_emits_content_part_added(self):
         """content_part.added must follow output_item.added for message items."""
         from litellm.types.llms.openai import (
@@ -2180,6 +2225,17 @@ class TestEnsureOutputItemContentPartAdded:
         events = iterator._pending_response_events
         assert len(events) == 1
         assert isinstance(events[0], OutputItemAddedEvent)
+        assert iterator.sent_content_part_added_event is False
+
+    def test_role_only_empty_chunk_does_not_open_message_item(self):
+        """Role-only/empty-content chunks should not create an empty text item."""
+        iterator = self._make_iterator()
+        chunk = self._make_role_only_chunk()
+
+        iterator._ensure_output_item_for_chunk(chunk)
+
+        assert iterator._pending_response_events == []
+        assert iterator.sent_output_item_added_event is False
         assert iterator.sent_content_part_added_event is False
 
     def test_only_emits_once(self):

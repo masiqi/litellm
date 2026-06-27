@@ -191,10 +191,21 @@ class AnthropicResponsesStreamWrapper:
                 event.get("delta", "") if isinstance(event, dict) else ""
             )
             block_idx = (
-                self._item_id_to_block_index.get(item_id, self._current_block_index)
+                self._item_id_to_block_index.get(item_id, -1)
                 if item_id
                 else self._current_block_index
             )
+            if block_idx < 0:
+                block_idx = self._next_block_index()
+                if item_id:
+                    self._item_id_to_block_index[item_id] = block_idx
+                self._chunk_queue.append(
+                    {
+                        "type": "content_block_start",
+                        "index": block_idx,
+                        "content_block": {"type": "thinking", "thinking": ""},
+                    }
+                )
             self._chunk_queue.append(
                 {
                     "type": "content_block_delta",
@@ -322,17 +333,17 @@ class AnthropicResponsesStreamWrapper:
         if self._chunk_queue:
             return self._chunk_queue.popleft()
 
-        # Emit message_start if not yet done (fallback if response.created wasn't fired)
-        if not self._sent_message_start:
-            self._sent_message_start = True
-            self._chunk_queue.append(self._make_message_start())
-            return self._chunk_queue.popleft()
-
         # Consume the upstream stream
         try:
             async for event in self.responses_stream:
                 self._process_event(event)
                 if self._chunk_queue:
+                    if (
+                        self._chunk_queue[0].get("type") != "message_start"
+                        and not self._sent_message_start
+                    ):
+                        self._sent_message_start = True
+                        self._chunk_queue.appendleft(self._make_message_start())
                     return self._chunk_queue.popleft()
         except StopAsyncIteration:
             pass
