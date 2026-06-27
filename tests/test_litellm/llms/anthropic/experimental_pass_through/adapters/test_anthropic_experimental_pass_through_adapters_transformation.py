@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from typing import Any, cast
@@ -400,6 +401,94 @@ def test_translate_anthropic_messages_to_openai_tool_message_placement():
     assert (
         tool_message_idx < user_message_idx
     ), "Tool message should be placed before user message"
+
+
+def test_thinking_blocks_are_not_forwarded_to_openai_compatible_models():
+    """OpenAI-compatible chat backends should not receive Anthropic thinking history fields."""
+    anthropic_messages = [
+        AnthropicMessagesUserMessageParam(
+            role="user",
+            content="用 Bash 执行 pwd，然后告诉我当前目录",
+        ),
+        AnthopicMessagesAssistantMessageParam(
+            role="assistant",
+            content=[
+                {
+                    "type": "thinking",
+                    "thinking": "Need to call Bash.",
+                    "signature": "",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_bash",
+                    "name": "Bash",
+                    "input": {"command": "pwd"},
+                },
+            ],
+        ),
+        AnthropicMessagesUserMessageParam(
+            role="user",
+            content=[
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_bash",
+                    "content": "/private/tmp\n",
+                }
+            ],
+        ),
+    ]
+
+    adapter = LiteLLMAnthropicMessagesAdapter()
+    result = adapter.translate_anthropic_messages_to_openai(
+        messages=anthropic_messages,
+        model="glm-5.2",
+    )
+
+    assistant_message = next(
+        message for message in result if message["role"] == "assistant"
+    )
+    assert "thinking_blocks" not in assistant_message
+    assert assistant_message["tool_calls"][0]["id"] == "call_bash"
+    assert assistant_message["tool_calls"][0]["function"]["arguments"] == json.dumps(
+        {"command": "pwd"}
+    )
+    assert result[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_bash",
+        "content": "/private/tmp\n",
+    }
+
+
+def test_thinking_blocks_are_preserved_for_claude_models():
+    """Claude-family backends need thinking history for continued tool-use turns."""
+    anthropic_messages = [
+        AnthopicMessagesAssistantMessageParam(
+            role="assistant",
+            content=[
+                {
+                    "type": "thinking",
+                    "thinking": "Need to call Bash.",
+                    "signature": "sig",
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_bash",
+                    "name": "Bash",
+                    "input": {"command": "pwd"},
+                },
+            ],
+        )
+    ]
+
+    adapter = LiteLLMAnthropicMessagesAdapter()
+    result = adapter.translate_anthropic_messages_to_openai(
+        messages=anthropic_messages,
+        model="anthropic/claude-sonnet-4-6",
+    )
+
+    assert result[0]["thinking_blocks"][0]["thinking"] == "Need to call Bash."
+    assert result[0]["thinking_blocks"][0]["signature"] == "sig"
+    assert result[0]["tool_calls"][0]["id"] == "call_bash"
 
 
 def test_translate_openai_content_to_anthropic_empty_function_arguments():

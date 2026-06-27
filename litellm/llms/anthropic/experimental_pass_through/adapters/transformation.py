@@ -643,6 +643,13 @@ class LiteLLMAnthropicMessagesAdapter:
             thinking_blocks: List[
                 Union[ChatCompletionThinkingBlock, ChatCompletionRedactedThinkingBlock]
             ] = []
+            should_preserve_thinking_blocks = model is None or (
+                bool(model)
+                and (
+                    self.is_anthropic_claude_model(cast(str, model))
+                    or self.is_bedrock_arn_model(cast(str, model))
+                )
+            )
             if m["role"] == "assistant":
                 if isinstance(m.get("content"), str):
                     assistant_message_str = str(m.get("content", ""))
@@ -734,13 +741,10 @@ class LiteLLMAnthropicMessagesAdapter:
                 assistant_message = ChatCompletionAssistantMessage(
                     role="assistant",
                     content=assistant_content,
-                    thinking_blocks=(
-                        thinking_blocks if len(thinking_blocks) > 0 else None
-                    ),
                 )
                 if len(tool_calls) > 0:
                     assistant_message["tool_calls"] = tool_calls  # type: ignore
-                if len(thinking_blocks) > 0:
+                if should_preserve_thinking_blocks and len(thinking_blocks) > 0:
                     assistant_message["thinking_blocks"] = thinking_blocks  # type: ignore
                 new_messages.append(assistant_message)
 
