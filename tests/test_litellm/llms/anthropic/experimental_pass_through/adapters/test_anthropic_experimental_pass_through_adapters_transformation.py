@@ -1417,6 +1417,60 @@ def test_cache_control_not_preserved_for_non_claude_model():
     assert "cache_control" not in result[0]["content"][0]
 
 
+def test_text_only_blocks_are_flattened_for_openai_compatible_models():
+    """Claude Code sends text as Anthropic blocks; text-only blocks should
+    become plain OpenAI chat strings for non-Claude OpenAI-compatible backends.
+    """
+    from litellm.types.llms.anthropic import AnthropicMessagesRequest
+
+    anthropic_request = AnthropicMessagesRequest(
+        model="openai/glm-5.2",
+        max_tokens=32000,
+        system=[
+            {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1"},
+            {"type": "text", "text": "You are a Claude agent."},
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "用 Bash 执行 pwd，"},
+                    {"type": "text", "text": "然后告诉我当前目录"},
+                ],
+            }
+        ],
+        tools=[
+            {
+                "name": "Bash",
+                "description": "Executes a bash command and returns its output.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}},
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+    )
+
+    adapter = LiteLLMAnthropicMessagesAdapter()
+    openai_request, _ = adapter.translate_anthropic_to_openai(
+        anthropic_message_request=anthropic_request
+    )
+
+    system_message = openai_request["messages"][0]
+    user_message = openai_request["messages"][1]
+
+    assert system_message["role"] == "system"
+    assert system_message["content"] == (
+        "x-anthropic-billing-header: cc_version=2.1You are a Claude agent."
+    )
+    assert user_message["role"] == "user"
+    assert user_message["content"] == "用 Bash 执行 pwd，然后告诉我当前目录"
+    assert openai_request["tools"][0]["type"] == "function"
+    assert openai_request["tools"][0]["function"]["name"] == "Bash"
+
+
 @pytest.mark.parametrize(
     "model, expected",
     [

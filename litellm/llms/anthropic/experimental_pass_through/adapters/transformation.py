@@ -383,6 +383,27 @@ class LiteLLMAnthropicMessagesAdapter:
             isinstance(tool_type, str) and tool_type.startswith("web_search")
         ) or tool_name == "web_search"
 
+    def _should_flatten_text_content_blocks_for_model(
+        self, model: Optional[str]
+    ) -> bool:
+        return bool(model) and not (
+            self.is_anthropic_claude_model(cast(str, model))
+            or self.is_bedrock_arn_model(cast(str, model))
+        )
+
+    @staticmethod
+    def _flatten_text_only_content_blocks(content_blocks: List[Any]) -> Optional[str]:
+        text_parts: List[str] = []
+        for block in content_blocks:
+            if (
+                not isinstance(block, dict)
+                or block.get("type") != "text"
+                or block.get("cache_control") is not None
+            ):
+                return None
+            text_parts.append(str(block.get("text", "")))
+        return "".join(text_parts)
+
     def translate_anthropic_messages_to_openai(
         self,
         messages: List[
@@ -409,151 +430,120 @@ class LiteLLMAnthropicMessagesAdapter:
                         role="user", content=message_content
                     )
                 elif message_content and isinstance(message_content, list):
-                    for content in message_content:
-                        if content.get("type") == "text":
-                            text_obj = ChatCompletionTextObject(
-                                type="text", text=content.get("text", "")
-                            )
-                            self._add_cache_control_if_applicable(
-                                content, text_obj, model
-                            )
-                            new_user_content_list.append(text_obj)  # type: ignore
-                        elif content.get("type") == "image":
-                            # Convert Anthropic image format to OpenAI format
-                            source = content.get("source", {})
-                            openai_image_url = (
-                                self._translate_anthropic_image_to_openai(
-                                    cast(dict, source)
+                    flattened_text_content = (
+                        self._flatten_text_only_content_blocks(message_content)
+                        if self._should_flatten_text_content_blocks_for_model(model)
+                        else None
+                    )
+                    if flattened_text_content is not None:
+                        user_message = ChatCompletionUserMessage(
+                            role="user", content=flattened_text_content
+                        )
+                    else:
+                        for content in message_content:
+                            if content.get("type") == "text":
+                                text_obj = ChatCompletionTextObject(
+                                    type="text", text=content.get("text", "")
                                 )
-                            )
+                                self._add_cache_control_if_applicable(
+                                    content, text_obj, model
+                                )
+                                new_user_content_list.append(text_obj)  # type: ignore
+                            elif content.get("type") == "image":
+                                # Convert Anthropic image format to OpenAI format
+                                source = content.get("source", {})
+                                openai_image_url = (
+                                    self._translate_anthropic_image_to_openai(
+                                        cast(dict, source)
+                                    )
+                                )
 
-                            if openai_image_url:
-                                image_url_obj = ChatCompletionImageUrlObject(
-                                    url=openai_image_url
+                                if openai_image_url:
+                                    image_url_obj = ChatCompletionImageUrlObject(
+                                        url=openai_image_url
+                                    )
+                                    image_obj = ChatCompletionImageObject(
+                                        type="image_url", image_url=image_url_obj
+                                    )
+                                    self._add_cache_control_if_applicable(
+                                        content, image_obj, model
+                                    )
+                                    new_user_content_list.append(image_obj)  # type: ignore
+                            elif content.get("type") == "document":
+                                # Convert Anthropic document format (PDF, etc.) to OpenAI format
+                                source = content.get("source", {})
+                                openai_image_url = (
+                                    self._translate_anthropic_image_to_openai(
+                                        cast(dict, source)
+                                    )
                                 )
-                                image_obj = ChatCompletionImageObject(
-                                    type="image_url", image_url=image_url_obj
-                                )
-                                self._add_cache_control_if_applicable(
-                                    content, image_obj, model
-                                )
-                                new_user_content_list.append(image_obj)  # type: ignore
-                        elif content.get("type") == "document":
-                            # Convert Anthropic document format (PDF, etc.) to OpenAI format
-                            source = content.get("source", {})
-                            openai_image_url = (
-                                self._translate_anthropic_image_to_openai(
-                                    cast(dict, source)
-                                )
-                            )
 
-                            if openai_image_url:
-                                image_url_obj = ChatCompletionImageUrlObject(
-                                    url=openai_image_url
-                                )
-                                doc_obj = ChatCompletionImageObject(
-                                    type="image_url", image_url=image_url_obj
-                                )
-                                self._add_cache_control_if_applicable(
-                                    content, doc_obj, model
-                                )
-                                new_user_content_list.append(doc_obj)  # type: ignore
-                        elif content.get("type") == "tool_result":
-                            if "content" not in content:
-                                tool_result = ChatCompletionToolMessage(
-                                    role="tool",
-                                    tool_call_id=content.get("tool_use_id", ""),
-                                    content="",
-                                )
-                                self._add_cache_control_if_applicable(
-                                    content, tool_result, model
-                                )
-                                tool_message_list.append(tool_result)  # type: ignore[arg-type]
-                            elif isinstance(content.get("content"), str):
-                                tool_result = ChatCompletionToolMessage(
-                                    role="tool",
-                                    tool_call_id=content.get("tool_use_id", ""),
-                                    content=str(content.get("content", "")),
-                                )
-                                self._add_cache_control_if_applicable(
-                                    content, tool_result, model
-                                )
-                                tool_message_list.append(tool_result)  # type: ignore[arg-type]
-                            elif isinstance(content.get("content"), list):
-                                # Combine all content items into a single tool message
-                                # to avoid creating multiple tool_result blocks with the same ID
-                                # (each tool_use must have exactly one tool_result)
-                                content_items = list(content.get("content", []))
+                                if openai_image_url:
+                                    image_url_obj = ChatCompletionImageUrlObject(
+                                        url=openai_image_url
+                                    )
+                                    doc_obj = ChatCompletionImageObject(
+                                        type="image_url", image_url=image_url_obj
+                                    )
+                                    self._add_cache_control_if_applicable(
+                                        content, doc_obj, model
+                                    )
+                                    new_user_content_list.append(doc_obj)  # type: ignore
+                            elif content.get("type") == "tool_result":
+                                if "content" not in content:
+                                    tool_result = ChatCompletionToolMessage(
+                                        role="tool",
+                                        tool_call_id=content.get("tool_use_id", ""),
+                                        content="",
+                                    )
+                                    self._add_cache_control_if_applicable(
+                                        content, tool_result, model
+                                    )
+                                    tool_message_list.append(tool_result)  # type: ignore[arg-type]
+                                elif isinstance(content.get("content"), str):
+                                    tool_result = ChatCompletionToolMessage(
+                                        role="tool",
+                                        tool_call_id=content.get("tool_use_id", ""),
+                                        content=str(content.get("content", "")),
+                                    )
+                                    self._add_cache_control_if_applicable(
+                                        content, tool_result, model
+                                    )
+                                    tool_message_list.append(tool_result)  # type: ignore[arg-type]
+                                elif isinstance(content.get("content"), list):
+                                    # Combine all content items into a single tool message
+                                    # to avoid creating multiple tool_result blocks with the same ID
+                                    # (each tool_use must have exactly one tool_result)
+                                    content_items = list(content.get("content", []))
 
-                                # For single-item content, maintain backward compatibility with string/url format
-                                if len(content_items) == 1:
-                                    c = content_items[0]
-                                    if isinstance(c, str):
-                                        tool_result = ChatCompletionToolMessage(
-                                            role="tool",
-                                            tool_call_id=content.get("tool_use_id", ""),
-                                            content=c,
-                                        )
-                                        self._add_cache_control_if_applicable(
-                                            content, tool_result, model
-                                        )
-                                        tool_message_list.append(tool_result)  # type: ignore[arg-type]
-                                    elif isinstance(c, dict):
-                                        if c.get("type") == "text":
-                                            tool_result = ChatCompletionToolMessage(
-                                                role="tool",
-                                                tool_call_id=content.get(
-                                                    "tool_use_id", ""
-                                                ),
-                                                content=c.get("text", ""),
-                                            )
-                                            self._add_cache_control_if_applicable(
-                                                content, tool_result, model
-                                            )
-                                            tool_message_list.append(tool_result)  # type: ignore[arg-type]
-                                        elif c.get("type") == "image":
-                                            source = c.get("source", {})
-                                            openai_image_url = (
-                                                self._translate_anthropic_image_to_openai(
-                                                    cast(dict, source)
-                                                )
-                                                or ""
-                                            )
-                                            tool_result = ChatCompletionToolMessage(
-                                                role="tool",
-                                                tool_call_id=content.get(
-                                                    "tool_use_id", ""
-                                                ),
-                                                content=openai_image_url,
-                                            )
-                                            self._add_cache_control_if_applicable(
-                                                content, tool_result, model
-                                            )
-                                            tool_message_list.append(tool_result)  # type: ignore[arg-type]
-                                else:
-                                    # For multiple content items, combine into a single tool message
-                                    # with list content to preserve all items while having one tool_use_id
-                                    combined_content_parts: List[
-                                        Union[
-                                            ChatCompletionTextObject,
-                                            ChatCompletionImageObject,
-                                        ]
-                                    ] = []
-                                    for c in content_items:
+                                    # For single-item content, maintain backward compatibility with string/url format
+                                    if len(content_items) == 1:
+                                        c = content_items[0]
                                         if isinstance(c, str):
-                                            combined_content_parts.append(
-                                                ChatCompletionTextObject(
-                                                    type="text", text=c
-                                                )
+                                            tool_result = ChatCompletionToolMessage(
+                                                role="tool",
+                                                tool_call_id=content.get(
+                                                    "tool_use_id", ""
+                                                ),
+                                                content=c,
                                             )
+                                            self._add_cache_control_if_applicable(
+                                                content, tool_result, model
+                                            )
+                                            tool_message_list.append(tool_result)  # type: ignore[arg-type]
                                         elif isinstance(c, dict):
                                             if c.get("type") == "text":
-                                                combined_content_parts.append(
-                                                    ChatCompletionTextObject(
-                                                        type="text",
-                                                        text=c.get("text", ""),
-                                                    )
+                                                tool_result = ChatCompletionToolMessage(
+                                                    role="tool",
+                                                    tool_call_id=content.get(
+                                                        "tool_use_id", ""
+                                                    ),
+                                                    content=c.get("text", ""),
                                                 )
+                                                self._add_cache_control_if_applicable(
+                                                    content, tool_result, model
+                                                )
+                                                tool_message_list.append(tool_result)  # type: ignore[arg-type]
                                             elif c.get("type") == "image":
                                                 source = c.get("source", {})
                                                 openai_image_url = (
@@ -562,26 +552,71 @@ class LiteLLMAnthropicMessagesAdapter:
                                                     )
                                                     or ""
                                                 )
-                                                if openai_image_url:
+                                                tool_result = ChatCompletionToolMessage(
+                                                    role="tool",
+                                                    tool_call_id=content.get(
+                                                        "tool_use_id", ""
+                                                    ),
+                                                    content=openai_image_url,
+                                                )
+                                                self._add_cache_control_if_applicable(
+                                                    content, tool_result, model
+                                                )
+                                                tool_message_list.append(tool_result)  # type: ignore[arg-type]
+                                    else:
+                                        # For multiple content items, combine into a single tool message
+                                        # with list content to preserve all items while having one tool_use_id
+                                        combined_content_parts: List[
+                                            Union[
+                                                ChatCompletionTextObject,
+                                                ChatCompletionImageObject,
+                                            ]
+                                        ] = []
+                                        for c in content_items:
+                                            if isinstance(c, str):
+                                                combined_content_parts.append(
+                                                    ChatCompletionTextObject(
+                                                        type="text", text=c
+                                                    )
+                                                )
+                                            elif isinstance(c, dict):
+                                                if c.get("type") == "text":
                                                     combined_content_parts.append(
-                                                        ChatCompletionImageObject(
-                                                            type="image_url",
-                                                            image_url=ChatCompletionImageUrlObject(
-                                                                url=openai_image_url
-                                                            ),
+                                                        ChatCompletionTextObject(
+                                                            type="text",
+                                                            text=c.get("text", ""),
                                                         )
                                                     )
-                                    # Create a single tool message with combined content
-                                    if combined_content_parts:
-                                        tool_result = ChatCompletionToolMessage(
-                                            role="tool",
-                                            tool_call_id=content.get("tool_use_id", ""),
-                                            content=combined_content_parts,  # type: ignore
-                                        )
-                                        self._add_cache_control_if_applicable(
-                                            content, tool_result, model
-                                        )
-                                        tool_message_list.append(tool_result)  # type: ignore[arg-type]
+                                                elif c.get("type") == "image":
+                                                    source = c.get("source", {})
+                                                    openai_image_url = (
+                                                        self._translate_anthropic_image_to_openai(
+                                                            cast(dict, source)
+                                                        )
+                                                        or ""
+                                                    )
+                                                    if openai_image_url:
+                                                        combined_content_parts.append(
+                                                            ChatCompletionImageObject(
+                                                                type="image_url",
+                                                                image_url=ChatCompletionImageUrlObject(
+                                                                    url=openai_image_url
+                                                                ),
+                                                            )
+                                                        )
+                                        # Create a single tool message with combined content
+                                        if combined_content_parts:
+                                            tool_result = ChatCompletionToolMessage(
+                                                role="tool",
+                                                tool_call_id=content.get(
+                                                    "tool_use_id", ""
+                                                ),
+                                                content=combined_content_parts,  # type: ignore
+                                            )
+                                            self._add_cache_control_if_applicable(
+                                                content, tool_result, model
+                                            )
+                                            tool_message_list.append(tool_result)  # type: ignore[arg-type]
 
             if len(tool_message_list) > 0:
                 new_messages.extend(tool_message_list)
@@ -1003,6 +1038,7 @@ class LiteLLMAnthropicMessagesAdapter:
         system_content = anthropic_message_request["system"]
         if not system_content:
             return
+        model_name = anthropic_message_request.get("model", "")
         # Handle system as string or array of content blocks
         if isinstance(system_content, str):
             new_messages.insert(
@@ -1010,9 +1046,22 @@ class LiteLLMAnthropicMessagesAdapter:
                 ChatCompletionSystemMessage(role="system", content=system_content),
             )
         elif isinstance(system_content, list):
+            flattened_text_content = (
+                self._flatten_text_only_content_blocks(system_content)
+                if self._should_flatten_text_content_blocks_for_model(model_name)
+                else None
+            )
+            if flattened_text_content is not None:
+                new_messages.insert(
+                    0,
+                    ChatCompletionSystemMessage(
+                        role="system", content=flattened_text_content
+                    ),
+                )
+                return
+
             # Convert Anthropic system content blocks to OpenAI format
             openai_system_content: List[Dict[str, Any]] = []
-            model_name = anthropic_message_request.get("model", "")
             for block in system_content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text_block: Dict[str, Any] = {
@@ -1024,7 +1073,9 @@ class LiteLLMAnthropicMessagesAdapter:
             if openai_system_content:
                 new_messages.insert(
                     0,
-                    ChatCompletionSystemMessage(role="system", content=openai_system_content),  # type: ignore
+                    ChatCompletionSystemMessage(
+                        role="system", content=openai_system_content
+                    ),  # type: ignore
                 )
 
     def _translate_metadata_to_openai(
