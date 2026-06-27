@@ -1,0 +1,90 @@
+name: Build Test Docker Image
+
+on:
+  push:
+    branches:
+      - "litellm_anthropic_messages_streaming_fix*"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR tag to publish"
+        required: false
+        default: "claude-code-r3pro-fix"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.image_tag || 'claude-code-r3pro-fix' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          sudo apt-get clean
+          df -h /
+
+      - name: Prepare image tags
+        id: image
+        env:
+          INPUT_IMAGE_TAG: ${{ github.event.inputs.image_tag || 'claude-code-r3pro-fix' }}
+        run: |
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          tag="${INPUT_IMAGE_TAG:-claude-code-r3pro-fix}"
+          case "$tag" in
+            ""|*[!a-zA-Z0-9_.-]*)
+              echo "Invalid image_tag '$tag'. Use only letters, digits, underscore, dot, and dash." >&2
+              exit 1
+              ;;
+          esac
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          {
+            echo "image=$image"
+            echo "tag=$tag"
+            echo "short_sha=$short_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Login to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push test image
+        uses: docker/build-push-action@0adf9959216b96bec444f325f1e493d4aa344497 # v6.14.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image }}:${{ steps.image.outputs.tag }}
+            ${{ steps.image.outputs.image }}:sha-${{ steps.image.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=LiteLLM test image for Anthropic messages streaming compatibility validation
+
+      - name: Write image summary
+        run: |
+          {
+            echo "Published test images:"
+            echo ""
+            echo "- \`${{ steps.image.outputs.image }}:${{ steps.image.outputs.tag }}\`"
+            echo "- \`${{ steps.image.outputs.image }}:sha-${{ steps.image.outputs.short_sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
