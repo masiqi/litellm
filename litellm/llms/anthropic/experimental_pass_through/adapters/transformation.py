@@ -392,13 +392,17 @@ class LiteLLMAnthropicMessagesAdapter:
         )
 
     @staticmethod
-    def _flatten_text_only_content_blocks(content_blocks: List[Any]) -> Optional[str]:
+    def _flatten_text_only_content_blocks(
+        content_blocks: List[Any],
+        *,
+        ignore_cache_control: bool = False,
+    ) -> Optional[str]:
         text_parts: List[str] = []
         for block in content_blocks:
             if (
                 not isinstance(block, dict)
                 or block.get("type") != "text"
-                or block.get("cache_control") is not None
+                or (not ignore_cache_control and block.get("cache_control") is not None)
             ):
                 return None
             text_parts.append(str(block.get("text", "")))
@@ -431,7 +435,9 @@ class LiteLLMAnthropicMessagesAdapter:
                     )
                 elif message_content and isinstance(message_content, list):
                     flattened_text_content = (
-                        self._flatten_text_only_content_blocks(message_content)
+                        self._flatten_text_only_content_blocks(
+                            message_content, ignore_cache_control=True
+                        )
                         if self._should_flatten_text_content_blocks_for_model(model)
                         else None
                     )
@@ -1047,7 +1053,9 @@ class LiteLLMAnthropicMessagesAdapter:
             )
         elif isinstance(system_content, list):
             flattened_text_content = (
-                self._flatten_text_only_content_blocks(system_content)
+                self._flatten_text_only_content_blocks(
+                    system_content, ignore_cache_control=True
+                )
                 if self._should_flatten_text_content_blocks_for_model(model_name)
                 else None
             )

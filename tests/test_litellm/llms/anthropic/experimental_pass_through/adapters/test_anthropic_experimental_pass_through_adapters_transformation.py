@@ -1428,14 +1428,22 @@ def test_text_only_blocks_are_flattened_for_openai_compatible_models():
         max_tokens=32000,
         system=[
             {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1"},
-            {"type": "text", "text": "You are a Claude agent."},
+            {
+                "type": "text",
+                "text": "You are a Claude agent.",
+                "cache_control": {"type": "ephemeral"},
+            },
         ],
         messages=[
             {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "用 Bash 执行 pwd，"},
-                    {"type": "text", "text": "然后告诉我当前目录"},
+                    {
+                        "type": "text",
+                        "text": "然后告诉我当前目录",
+                        "cache_control": {"type": "ephemeral"},
+                    },
                 ],
             }
         ],
