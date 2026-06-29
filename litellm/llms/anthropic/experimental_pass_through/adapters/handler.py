@@ -382,6 +382,37 @@ def _completion_kwargs_without_tool_property_descriptions(
     return retry_kwargs
 
 
+def _completion_kwargs_without_tool_descriptions(
+    completion_kwargs: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Return retry kwargs with OpenAI function/tool descriptions stripped."""
+    tools = completion_kwargs.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return None
+
+    retry_kwargs = dict(completion_kwargs)
+    retry_tools = copy.deepcopy(tools)
+    retry_kwargs["tools"] = retry_tools
+    changed = False
+
+    for tool in retry_tools:
+        if not isinstance(tool, dict):
+            continue
+
+        if "description" in tool:
+            tool.pop("description", None)
+            changed = True
+
+        function = tool.get("function")
+        if isinstance(function, dict) and "description" in function:
+            function.pop("description", None)
+            changed = True
+
+    if not changed:
+        return None
+    return retry_kwargs
+
+
 def _should_retry_without_tool_property_descriptions(exception: BaseException) -> bool:
     """Detect connection-style provider failures worth one schema-light retry."""
     if not litellm.anthropic_messages_retry_without_tool_property_descriptions:
@@ -737,7 +768,28 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 "connection failure: %s",
                 e,
             )
-            completion_response = await litellm.acompletion(**retry_kwargs)
+            try:
+                completion_response = await litellm.acompletion(**retry_kwargs)
+            except Exception as property_retry_error:
+                description_retry_kwargs = _completion_kwargs_without_tool_descriptions(
+                    retry_kwargs
+                )
+                if (
+                    description_retry_kwargs is None
+                    or not _should_retry_without_tool_property_descriptions(
+                        property_retry_error
+                    )
+                ):
+                    raise
+                verbose_logger.debug(
+                    "Retrying Anthropic Messages chat-completions bridge request "
+                    "without tool descriptions after provider connection "
+                    "failure: %s",
+                    property_retry_error,
+                )
+                completion_response = await litellm.acompletion(
+                    **description_retry_kwargs
+                )
 
         if stream:
             transformed_stream = (
@@ -903,7 +955,26 @@ class LiteLLMMessagesToCompletionTransformationHandler:
                 "connection failure: %s",
                 e,
             )
-            completion_response = litellm.completion(**retry_kwargs)
+            try:
+                completion_response = litellm.completion(**retry_kwargs)
+            except Exception as property_retry_error:
+                description_retry_kwargs = _completion_kwargs_without_tool_descriptions(
+                    retry_kwargs
+                )
+                if (
+                    description_retry_kwargs is None
+                    or not _should_retry_without_tool_property_descriptions(
+                        property_retry_error
+                    )
+                ):
+                    raise
+                verbose_logger.debug(
+                    "Retrying Anthropic Messages chat-completions bridge request "
+                    "without tool descriptions after provider connection "
+                    "failure: %s",
+                    property_retry_error,
+                )
+                completion_response = litellm.completion(**description_retry_kwargs)
 
         if stream:
             transformed_stream = (

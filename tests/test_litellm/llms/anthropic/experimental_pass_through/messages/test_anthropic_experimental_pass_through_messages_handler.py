@@ -335,6 +335,106 @@ async def test_openai_chat_bridge_does_not_retry_without_tool_property_descripti
         mock_acompletion.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_openai_chat_bridge_retries_without_tool_descriptions_when_schema_property_retry_fails(
+    monkeypatch,
+):
+    mock_response = ModelResponse(
+        id="test-id",
+        model="openai/glm-5.2",
+        choices=[
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop",
+            }
+        ],
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    )
+
+    tools = [
+        {
+            "name": "Bash",
+            "description": "Executes a bash command and returns its output.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to execute",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Optional timeout in milliseconds",
+                    },
+                },
+                "required": ["command"],
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        litellm,
+        "anthropic_messages_retry_without_tool_property_descriptions",
+        True,
+        raising=False,
+    )
+
+    with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        mock_acompletion.side_effect = [
+            litellm.InternalServerError(
+                message="InternalServerError: OpenAIException - Connection error.",
+                llm_provider="openai",
+                model="openai/glm-5.2",
+            ),
+            litellm.InternalServerError(
+                message="InternalServerError: OpenAIException - Connection error.",
+                llm_provider="openai",
+                model="openai/glm-5.2",
+            ),
+            mock_response,
+        ]
+
+        await LiteLLMMessagesToCompletionTransformationHandler.async_anthropic_messages_handler(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "用 Bash 执行 pwd"}],
+            model="openai/glm-5.2",
+            tools=tools,
+            stream=False,
+        )
+
+        assert mock_acompletion.call_count == 3
+
+        first_function = mock_acompletion.call_args_list[0].kwargs["tools"][0][
+            "function"
+        ]
+        property_retry_function = mock_acompletion.call_args_list[1].kwargs["tools"][0][
+            "function"
+        ]
+        description_retry_function = mock_acompletion.call_args_list[2].kwargs["tools"][
+            0
+        ]["function"]
+
+        assert first_function["description"] == tools[0]["description"]
+        assert (
+            first_function["parameters"]["properties"]["command"]["description"]
+            == "The command to execute"
+        )
+
+        assert property_retry_function["description"] == tools[0]["description"]
+        assert (
+            "description"
+            not in property_retry_function["parameters"]["properties"]["command"]
+        )
+
+        assert "description" not in description_retry_function
+        assert (
+            "description"
+            not in description_retry_function["parameters"]["properties"]["command"]
+        )
+        assert description_retry_function["parameters"]["required"] == ["command"]
+
+
 def test_openai_model_with_thinking_converts_to_reasoning():
     """
     Test that when using an OpenAI model with thinking parameter, the thinking is
