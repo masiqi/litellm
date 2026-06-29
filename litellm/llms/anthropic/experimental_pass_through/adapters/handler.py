@@ -1,3 +1,4 @@
+import copy
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -300,6 +301,99 @@ async def _run_polyfill_if_enabled(
 # init adapter
 ANTHROPIC_ADAPTER = AnthropicAdapter()
 ########################################################
+
+
+def _strip_tool_schema_property_descriptions(value: Any) -> bool:
+    """Remove nested JSON-Schema property descriptions in-place.
+
+    Returns True when the value was changed. Top-level function/tool
+    descriptions are intentionally preserved; the fallback only removes
+    field-level annotations that have been observed to make some
+    OpenAI-compatible chat-completions gateways disconnect.
+    """
+    changed = False
+
+    if isinstance(value, list):
+        for item in value:
+            changed = _strip_tool_schema_property_descriptions(item) or changed
+        return changed
+
+    if not isinstance(value, dict):
+        return False
+
+    properties = value.get("properties")
+    if isinstance(properties, dict):
+        for prop_schema in properties.values():
+            if isinstance(prop_schema, dict):
+                if "description" in prop_schema:
+                    prop_schema.pop("description", None)
+                    changed = True
+                changed = (
+                    _strip_tool_schema_property_descriptions(prop_schema) or changed
+                )
+
+    for nested_key in ("items", "anyOf", "oneOf", "allOf", "$defs", "definitions"):
+        nested_value = value.get(nested_key)
+        if isinstance(nested_value, dict):
+            if nested_key in ("$defs", "definitions"):
+                for def_schema in nested_value.values():
+                    changed = (
+                        _strip_tool_schema_property_descriptions(def_schema) or changed
+                    )
+            else:
+                changed = (
+                    _strip_tool_schema_property_descriptions(nested_value) or changed
+                )
+        elif isinstance(nested_value, list):
+            for item in nested_value:
+                changed = _strip_tool_schema_property_descriptions(item) or changed
+
+    for key, nested_value in value.items():
+        if key in (
+            "properties",
+            "items",
+            "anyOf",
+            "oneOf",
+            "allOf",
+            "$defs",
+            "definitions",
+        ):
+            continue
+        if isinstance(nested_value, (dict, list)):
+            changed = _strip_tool_schema_property_descriptions(nested_value) or changed
+
+    return changed
+
+
+def _completion_kwargs_without_tool_property_descriptions(
+    completion_kwargs: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Return retry kwargs with only tool property descriptions stripped."""
+    tools = completion_kwargs.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return None
+
+    retry_kwargs = dict(completion_kwargs)
+    retry_tools = copy.deepcopy(tools)
+    retry_kwargs["tools"] = retry_tools
+    changed = _strip_tool_schema_property_descriptions(retry_tools)
+    if not changed:
+        return None
+    return retry_kwargs
+
+
+def _should_retry_without_tool_property_descriptions(exception: BaseException) -> bool:
+    """Detect connection-style provider failures worth one schema-light retry."""
+    if not litellm.anthropic_messages_retry_without_tool_property_descriptions:
+        return False
+
+    error_text = str(exception).lower()
+    return (
+        "connection error" in error_text
+        or "server disconnected" in error_text
+        or "readerror" in error_text
+        or "apiconnectionerror" in error_text
+    )
 
 
 class LiteLLMMessagesToCompletionTransformationHandler:
@@ -626,7 +720,24 @@ class LiteLLMMessagesToCompletionTransformationHandler:
             extra_kwargs=kwargs,
         )
 
-        completion_response = await litellm.acompletion(**completion_kwargs)
+        try:
+            completion_response = await litellm.acompletion(**completion_kwargs)
+        except Exception as e:
+            retry_kwargs = _completion_kwargs_without_tool_property_descriptions(
+                completion_kwargs
+            )
+            if (
+                retry_kwargs is None
+                or not _should_retry_without_tool_property_descriptions(e)
+            ):
+                raise
+            verbose_logger.debug(
+                "Retrying Anthropic Messages chat-completions bridge request "
+                "without tool schema property descriptions after provider "
+                "connection failure: %s",
+                e,
+            )
+            completion_response = await litellm.acompletion(**retry_kwargs)
 
         if stream:
             transformed_stream = (
@@ -775,7 +886,24 @@ class LiteLLMMessagesToCompletionTransformationHandler:
             extra_kwargs=kwargs,
         )
 
-        completion_response = litellm.completion(**completion_kwargs)
+        try:
+            completion_response = litellm.completion(**completion_kwargs)
+        except Exception as e:
+            retry_kwargs = _completion_kwargs_without_tool_property_descriptions(
+                completion_kwargs
+            )
+            if (
+                retry_kwargs is None
+                or not _should_retry_without_tool_property_descriptions(e)
+            ):
+                raise
+            verbose_logger.debug(
+                "Retrying Anthropic Messages chat-completions bridge request "
+                "without tool schema property descriptions after provider "
+                "connection failure: %s",
+                e,
+            )
+            completion_response = litellm.completion(**retry_kwargs)
 
         if stream:
             transformed_stream = (

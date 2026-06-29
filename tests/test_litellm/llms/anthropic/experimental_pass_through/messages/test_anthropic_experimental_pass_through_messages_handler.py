@@ -9,8 +9,12 @@ sys.path.insert(0, os.path.abspath("../../../../.."))
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import litellm
 from litellm.anthropic_interface import messages
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+from litellm.llms.anthropic.experimental_pass_through.adapters.handler import (
+    LiteLLMMessagesToCompletionTransformationHandler,
+)
 from litellm.types.utils import Delta, ModelResponse, StreamingChoices
 
 
@@ -193,6 +197,142 @@ async def test_bedrock_converse_budget_tokens_preserved():
         assert (
             thinking_param.get("budget_tokens") == 1024
         ), f"thinking.budget_tokens should be 1024, but got {thinking_param.get('budget_tokens')}"
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_bridge_retries_without_tool_property_descriptions_on_connection_error(
+    monkeypatch,
+):
+    """Some OpenAI-compatible chat-completions gateways disconnect on Claude
+    Code's full tool schemas. Retry once with field-level schema descriptions
+    removed, preserving the tools and their argument contract.
+    """
+    mock_response = ModelResponse(
+        id="test-id",
+        model="openai/glm-5.2",
+        choices=[
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": "stop",
+            }
+        ],
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    )
+
+    tools = [
+        {
+            "name": "Bash",
+            "description": "Executes a bash command and returns its output.",
+            "input_schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to execute",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Optional timeout in milliseconds",
+                    },
+                },
+                "required": ["command"],
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        litellm,
+        "anthropic_messages_retry_without_tool_property_descriptions",
+        True,
+        raising=False,
+    )
+
+    with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        mock_acompletion.side_effect = [
+            litellm.InternalServerError(
+                message="InternalServerError: OpenAIException - Connection error.",
+                llm_provider="openai",
+                model="openai/glm-5.2",
+            ),
+            mock_response,
+        ]
+
+        await LiteLLMMessagesToCompletionTransformationHandler.async_anthropic_messages_handler(
+            max_tokens=1024,
+            messages=[{"role": "user", "content": "用 Bash 执行 pwd"}],
+            model="openai/glm-5.2",
+            tools=tools,
+            stream=False,
+        )
+
+        assert mock_acompletion.call_count == 2
+
+        first_tools = mock_acompletion.call_args_list[0].kwargs["tools"]
+        first_function = first_tools[0]["function"]
+        assert first_function["description"] == tools[0]["description"]
+        assert (
+            first_function["parameters"]["properties"]["command"]["description"]
+            == "The command to execute"
+        )
+
+        retry_tools = mock_acompletion.call_args_list[1].kwargs["tools"]
+        retry_function = retry_tools[0]["function"]
+        retry_properties = retry_function["parameters"]["properties"]
+
+        assert retry_function["description"] == tools[0]["description"]
+        assert retry_properties["command"] == {"type": "string"}
+        assert retry_properties["timeout"] == {"type": "number"}
+        assert retry_function["parameters"]["required"] == ["command"]
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_bridge_does_not_retry_without_tool_property_descriptions_when_disabled(
+    monkeypatch,
+):
+    tools = [
+        {
+            "name": "Bash",
+            "description": "Executes a bash command and returns its output.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to execute",
+                    },
+                },
+                "required": ["command"],
+            },
+        }
+    ]
+
+    monkeypatch.setattr(
+        litellm,
+        "anthropic_messages_retry_without_tool_property_descriptions",
+        False,
+        raising=False,
+    )
+
+    with patch("litellm.acompletion", new_callable=AsyncMock) as mock_acompletion:
+        mock_acompletion.side_effect = litellm.InternalServerError(
+            message="InternalServerError: OpenAIException - Connection error.",
+            llm_provider="openai",
+            model="openai/glm-5.2",
+        )
+
+        with pytest.raises(litellm.InternalServerError):
+            await LiteLLMMessagesToCompletionTransformationHandler.async_anthropic_messages_handler(
+                max_tokens=1024,
+                messages=[{"role": "user", "content": "用 Bash 执行 pwd"}],
+                model="openai/glm-5.2",
+                tools=tools,
+                stream=False,
+            )
+
+        mock_acompletion.assert_called_once()
 
 
 def test_openai_model_with_thinking_converts_to_reasoning():

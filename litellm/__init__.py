@@ -244,6 +244,13 @@ modify_params = bool(os.getenv("LITELLM_MODIFY_PARAMS", False))
 use_chat_completions_url_for_anthropic_messages: bool = bool(
     os.getenv("LITELLM_USE_CHAT_COMPLETIONS_URL_FOR_ANTHROPIC_MESSAGES", False)
 )  # When True, routes OpenAI /v1/messages requests to chat/completions instead of the Responses API
+anthropic_messages_retry_without_tool_property_descriptions: bool = (
+    os.getenv(
+        "LITELLM_ANTHROPIC_MESSAGES_RETRY_WITHOUT_TOOL_PROPERTY_DESCRIPTIONS",
+        "false",
+    ).lower()
+    == "true"
+)  # When True, retries Anthropic /v1/messages -> chat/completions provider connection failures with tool parameter property descriptions stripped
 # When True, strip the OpenAI-flavored `usage.total_tokens` field that
 # LiteLLM injects into non-streaming /v1/messages responses, bringing the
 # wire response into line with the Anthropic spec (matches the streaming
